@@ -1,0 +1,235 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+      - name: Create project files
+        run: |
+          mkdir -p mod && cd mod
+          cat > build.gradle <<'EOF_0'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+          }
+
+          version = project.mod_version
+          group = 'dev.sprintreset'
+          base { archivesName = 'sprint-reset' }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") { expand "version": project.version }
+          }
+          EOF_0
+          cat > gradle.properties <<'EOF_1'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.4
+          loader_version=0.18.4
+          loom_version=1.14-SNAPSHOT
+          fabric_version=0.141.1+1.21.11
+          mod_version=1.0.0
+          EOF_1
+          cat > settings.gradle <<'EOF_2'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF_2
+          mkdir -p src/main/java/dev/sprintreset
+          cat > src/main/java/dev/sprintreset/Config.java <<'EOF_3'
+          package dev.sprintreset;
+
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+          import net.fabricmc.loader.api.FabricLoader;
+
+          public final class Config {
+              public static boolean useSprintKey = false;
+
+              private static Path path() {
+                  return FabricLoader.getInstance().getConfigDir().resolve("sprint-reset.properties");
+              }
+
+              public static void load() {
+                  try {
+                      Path p = path();
+                      if (!Files.exists(p)) return;
+                      Properties pr = new Properties();
+                      try (InputStream in = Files.newInputStream(p)) { pr.load(in); }
+                      useSprintKey = Boolean.parseBoolean(pr.getProperty("useSprintKey", "false"));
+                  } catch (Exception ignored) {}
+              }
+
+              public static void save() {
+                  try {
+                      Properties pr = new Properties();
+                      pr.setProperty("useSprintKey", Boolean.toString(useSprintKey));
+                      try (OutputStream out = Files.newOutputStream(path())) { pr.store(out, "Sprint Reset"); }
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF_3
+          mkdir -p src/main/java/dev/sprintreset
+          cat > src/main/java/dev/sprintreset/SettingsScreen.java <<'EOF_4'
+          package dev.sprintreset;
+
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+
+          public class SettingsScreen extends Screen {
+              public SettingsScreen() {
+                  super(Text.literal("Sprint Reset"));
+              }
+
+              private static Text sprintKeyLabel() {
+                  return Text.translatable("sprintreset.option.sprintkey",
+                      Text.translatable(Config.useSprintKey ? "sprintreset.on" : "sprintreset.off"));
+              }
+
+              @Override
+              protected void init() {
+                  int x = this.width / 2 - 110;
+                  int y = this.height / 2 - 25;
+
+                  addDrawableChild(ButtonWidget.builder(sprintKeyLabel(), btn -> {
+                      Config.useSprintKey = !Config.useSprintKey;
+                      Config.save();
+                      btn.setMessage(sprintKeyLabel());
+                  }).dimensions(x, y, 220, 20).build());
+
+                  addDrawableChild(ButtonWidget.builder(Text.translatable("sprintreset.done"), btn -> this.close())
+                      .dimensions(x, y + 30, 220, 20).build());
+              }
+
+              @Override
+              public void close() {
+                  Config.save();
+                  super.close();
+              }
+          }
+          EOF_4
+          mkdir -p src/main/java/dev/sprintreset
+          cat > src/main/java/dev/sprintreset/SprintResetClient.java <<'EOF_5'
+          package dev.sprintreset;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.Identifier;
+          import org.lwjgl.glfw.GLFW;
+
+          public class SprintResetClient implements ClientModInitializer {
+              private static final KeyBinding.Category CATEGORY =
+                  KeyBinding.Category.create(Identifier.of("sprintreset", "main"));
+
+              private static KeyBinding resetKey;
+              private static KeyBinding settingsKey;
+              private static boolean prevSprintKey = false;
+
+              @Override
+              public void onInitializeClient() {
+                  Config.load();
+                  resetKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                      "key.sprintreset.reset", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, CATEGORY));
+                  settingsKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                      "key.sprintreset.settings", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_K, CATEGORY));
+
+                  ClientTickEvents.START_CLIENT_TICK.register(SprintResetClient::onTick);
+              }
+
+              private static void onTick(MinecraftClient client) {
+                  if (client.player == null) return;
+
+                  while (settingsKey.wasPressed()) {
+                      if (client.currentScreen == null) client.setScreen(new SettingsScreen());
+                  }
+
+                  boolean triggered = false;
+                  while (resetKey.wasPressed()) triggered = true;
+
+                  boolean sp = client.options.sprintKey.isPressed();
+                  if (Config.useSprintKey && sp && !prevSprintKey && client.player.isSprinting()) triggered = true;
+                  prevSprintKey = sp;
+
+                  if (triggered) {
+                      // one-time reset: stop sprinting right now, nothing is blocked afterwards
+                      client.options.sprintKey.setPressed(false);
+                      client.player.setSprinting(false);
+                  }
+              }
+          }
+          EOF_5
+          mkdir -p src/main/resources/assets/sprintreset/lang
+          cat > src/main/resources/assets/sprintreset/lang/en_us.json <<'EOF_6'
+          {
+            "key.category.sprintreset.main": "Sprint Reset",
+            "key.sprintreset.reset": "Reset sprint",
+            "key.sprintreset.settings": "Sprint Reset settings",
+            "sprintreset.option.sprintkey": "Reset on sprint key: %s",
+            "sprintreset.on": "ON",
+            "sprintreset.off": "OFF",
+            "sprintreset.done": "Done"
+          }
+          EOF_6
+          mkdir -p src/main/resources/assets/sprintreset/lang
+          cat > src/main/resources/assets/sprintreset/lang/ru_ru.json <<'EOF_7'
+          {
+            "key.category.sprintreset.main": "Сброс спринта",
+            "key.sprintreset.reset": "Сбросить спринт",
+            "key.sprintreset.settings": "Настройки сброса спринта",
+            "sprintreset.option.sprintkey": "Сброс на кнопку спринта: %s",
+            "sprintreset.on": "ВКЛ",
+            "sprintreset.off": "ВЫКЛ",
+            "sprintreset.done": "Готово"
+          }
+          EOF_7
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'EOF_8'
+          {
+            "schemaVersion": 1,
+            "id": "sprint-reset",
+            "version": "${version}",
+            "name": "Sprint Reset",
+            "description": "Key to reset sprint (W-tap) for PvP.",
+            "environment": "client",
+            "entrypoints": { "client": ["dev.sprintreset.SprintResetClient"] },
+            "depends": { "fabricloader": ">=0.18.0", "minecraft": "1.21.11", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF_8
+      - name: Build
+        run: gradle build
+        working-directory: mod
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sprint-reset-jar
+          path: mod/build/libs/sprint-reset-*.jar
